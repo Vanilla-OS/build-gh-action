@@ -1,0 +1,285 @@
+name: 'Vanilla OS Desktop Image CI'
+description: 'Build, push, and merge Vanilla OS images'
+author: 'Vanilla OS Contributors'
+branding:
+  icon: 'package'
+  color: 'orange'
+
+inputs:
+  mode:
+    description: 'build or merge'
+    required: true
+
+  recipe:
+    description: 'Path to the vib recipe file'
+    required: false
+    default: 'recipe.yml'
+
+  image:
+    description: 'Target image name without a tag (e.g. ghcr.io/owner/my-image)'
+    required: true
+
+  tags:
+    description: 'Comma-separated list of tags; the first one is reused for `base-image`'
+    required: false
+    default: 'latest'
+
+  legacy-image:
+    description: 'Optional legacy image reference including tag (e.g. ghcr.io/owner/desktop:main)'
+    required: false
+
+  base-image:
+    description: 'Base image reference in `recipe.yml` to substitute'
+    required: false
+    default: 'ghcr.io/vanilla-os/core:latest'
+
+  registry-username:
+    description: 'Registry username for authentication'
+    required: false
+
+  registry-password:
+    description: 'Registry password or token for authentication'
+    required: false
+
+outputs:
+  digest:
+    description: 'Digest of the produced image or merged manifest list'
+    value: ${{ steps.export.outputs.digest }}
+
+  image-url:
+    description: 'Target image URL (without tag)'
+    value: ${{ steps.image-name.outputs.image-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Verify Base Image Integrity
+      if: ${{ inputs.mode == 'build' && github.ref_type == 'tag' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+      run: gh attestation verify oci://$BASE_IMAGE --owner Vanilla-OS
+
+    - name: Change tag in recipe.
+      if: ${{ inputs.mode == 'build' && github.ref_type != 'tag' }}
+      shell: bash
+      env:
+        BASE_IMAGE: ${{ inputs.base-image }}
+        TAGS: ${{ inputs.tags }}
+        RECIPE: ${{ inputs.recipe }}
+      run: |
+        TAG="$(echo "$TAGS" | tr ',' '\n' | tr -d '[:space:]' | head -n 1)"
+        if [ -z "$TAG" ]; then
+          echo "::error::No tags parsed from '$TAGS'"
+          exit 1
+        fi
+        PREFIX="${BASE_IMAGE%:*}"
+        REPLACEMENT="${PREFIX}:${TAG}"
+        sed "s|${BASE_IMAGE}|${REPLACEMENT}|g" -i "$RECIPE"
+        echo "Base image set to ${REPLACEMENT}"
+
+    - if: ${{ inputs.mode == 'build' }}
+      uses: vanilla-os/vib-gh-action@v1.1.0
+      with:
+        recipe: ${{ inputs.recipe }}
+
+    - name: Upload Containerfile
+      if: ${{ inputs.mode == 'build' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: Containerfile
+        path: Containerfile
+        overwrite: true
+
+    - name: Generate image name
+      id: image-name
+      shell: bash
+      env:
+        IMAGE_INPUT: ${{ inputs.image }}
+      run: |
+        IMAGE_URL="$(echo "$IMAGE_INPUT" | tr '[:upper:]' '[:lower:]')"
+        {
+          echo "IMAGE_URL=$IMAGE_URL"
+          echo "IMAGE_HOST=${IMAGE_URL%%/*}"
+          echo "IMAGE_REGISTRY=${IMAGE_URL%/*}"
+          echo "IMAGE_NAME=${IMAGE_URL##*/}"
+        } >> "$GITHUB_ENV"
+        echo "image-url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+
+    - name: Docker meta
+      if: ${{ inputs.mode == 'build' }}
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ${{ env.IMAGE_URL }}
+        labels: org.opencontainers.image.created={{commit_date 'YYYY-MM-DDTHH:mm:ss.SSS[Z]'}}
+
+    - name: Detect architecture
+      if: ${{ inputs.mode == 'build' }}
+      shell: bash
+      run: |
+        case "$(uname -m)" in
+          x86_64) ARCH=amd64 ;;
+          aarch64|arm64) ARCH=arm64 ;;
+          *) echo "::error::Unsupported architecture $(uname -m)"; exit 1 ;;
+        esac
+        echo "ARCH=$ARCH" >> "$GITHUB_ENV"
+
+    - name: Get Git commit timestamps
+      if: ${{ inputs.mode == 'build' }}
+      shell: bash
+      run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+    - name: Set up Buildah
+      shell: bash
+      run: |
+        if ! command -v buildah >/dev/null 2>&1 || ! command -v podman >/dev/null 2>&1; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq buildah podman uidmap
+        fi
+        buildah --version
+        podman --version
+
+    - name: Login to registry
+      if: ${{ inputs.mode == 'merge' || (inputs.mode == 'build' && github.event_name != 'pull_request') }}
+      uses: redhat-actions/podman-login@v2
+      with:
+        registry: ${{ env.IMAGE_HOST }}
+        username: ${{ inputs.registry-username || github.repository_owner }}
+        password: ${{ inputs.registry-password || github.token }}
+
+    - name: Build image
+      if: ${{ inputs.mode == 'build' }}
+      id: build
+      uses: redhat-actions/buildah-build@v3
+      with:
+        image: ${{ env.IMAGE_NAME }}
+        tags: ${{ github.sha }}-${{ env.ARCH }}
+        containerfiles: Containerfile
+        archs: ${{ env.ARCH }}
+        labels: ${{ steps.meta.outputs.labels }}
+        layers: true
+        oci: true
+
+    - name: Push image by digest
+      if: ${{ inputs.mode == 'build' && github.event_name != 'pull_request' }}
+      id: push
+      uses: redhat-actions/push-to-registry@v3
+      with:
+        registry: ${{ env.IMAGE_REGISTRY }}
+        image: ${{ env.IMAGE_NAME }}
+        tags: ${{ steps.build.outputs.tags }}
+        digestfile: ${{ runner.temp }}/vib-digest.txt
+        extra-args: |
+          --compression-format zstd:chunked
+
+    - name: Export digest
+      if: ${{ inputs.mode == 'build' && github.event_name != 'pull_request' }}
+      shell: bash
+      env:
+        DIGEST: ${{ steps.push.outputs.digest }}
+      run: |
+        mkdir -p ${{ runner.temp }}/digests
+        touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+    - name: Upload digest
+      if: ${{ inputs.mode == 'build' && github.event_name != 'pull_request' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: digests-${{ env.ARCH }}
+        path: ${{ runner.temp }}/digests/*
+        if-no-files-found: error
+        retention-days: 1
+
+    - name: Download digests
+      if: ${{ inputs.mode == 'merge' }}
+      uses: actions/download-artifact@v8
+      with:
+        path: ${{ runner.temp }}/digests
+        pattern: digests-*
+        merge-multiple: true
+
+    - name: Extra image tag branch
+      if: ${{ inputs.mode == 'merge' && github.ref_type != 'tag' }}
+      shell: bash
+      run: echo "EXTRA_TAG=ref,event=branch" >> "$GITHUB_ENV"
+
+    - name: Extra image tag release
+      if: ${{ inputs.mode == 'merge' && github.ref_type == 'tag' }}
+      shell: bash
+      run: echo "EXTRA_TAG=raw,latest" >> "$GITHUB_ENV"
+
+    - name: Docker meta
+      if: ${{ inputs.mode == 'merge' }}
+      id: meta
+      uses: docker/metadata-action@v6
+      with:
+        images: ${{ env.IMAGE_URL }}
+        tags: |
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{raw}}
+          type=semver,pattern=v{{major}}
+          type=${{ env.EXTRA_TAG }}
+
+    - name: Normalize tags
+      if: ${{ inputs.mode == 'merge' }}
+      shell: bash
+      env:
+        META_TAGS: ${{ steps.meta.outputs.tags }}
+      run: echo "TAGS=$(echo "$META_TAGS" | sed "s|^${IMAGE_URL}:||" | tr '\n' ' ')" >> "$GITHUB_ENV"
+
+    - name: Create manifest lists
+      if: ${{ inputs.mode == 'merge' }}
+      working-directory: ${{ runner.temp }}/digests
+      shell: bash
+      run: |
+        for tag in $TAGS; do
+          buildah manifest create "$IMAGE_NAME:$tag"
+          for digest_file in *; do
+            [ -f "$digest_file" ] || continue
+            buildah manifest add "$IMAGE_NAME:$tag" \
+              "docker://${IMAGE_URL}@sha256:${digest_file}" \
+              --annotation "io.github.containers.compression.zstd=true"
+          done
+        done
+
+    - name: Push manifest list
+      if: ${{ inputs.mode == 'merge' }}
+      id: push
+      uses: redhat-actions/push-to-registry@v3
+      with:
+        registry: ${{ env.IMAGE_REGISTRY }}
+        image: ${{ env.IMAGE_NAME }}
+        tags: ${{ env.TAGS }}
+        digestfile: ${{ runner.temp }}/vib-manifest.digest
+        extra-args: |
+          --compression-format zstd:chunked
+
+    - name: Push legacy tag
+      if: ${{ inputs.mode == 'merge' && inputs.legacy-image != '' }}
+      shell: bash
+      env:
+        LEGACY_IMAGE: ${{ inputs.legacy-image }}
+      run: |
+        buildah manifest push --all \
+          --compression-format zstd:chunked \
+          "$IMAGE_NAME:${TAGS%% *}" "docker://$LEGACY_IMAGE"
+        echo "Pushed legacy $LEGACY_IMAGE"
+
+    - name: Export digest
+      if: ${{ inputs.mode == 'merge' }}
+      id: export
+      shell: bash
+      env:
+        DIGEST: ${{ steps.push.outputs.digest }}
+      run: echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+    - name: Attest pushed image
+      if: ${{ inputs.mode == 'merge' }}
+      uses: actions/attest@v4
+      with:
+        subject-name: ${{ env.IMAGE_URL }}
+        subject-digest: ${{ steps.export.outputs.digest }}
+        push-to-registry: false
