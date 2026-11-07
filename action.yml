@@ -12,12 +12,16 @@ inputs:
     default: 'recipe.yml'
 
   image:
-    description: 'Target image name without a tag (e.g. ghcr.io/owner/my-image)'
+    description: 'Target image name (without a tag) (e.g. ghcr.io/owner/my-image)'
     required: true
 
   base-image:
-    description: 'Base image reference in `recipe.yml` (without a tag) to substitute'
+    description: 'Base image reference in `recipe.yml` to substitute (without a tag)'
     required: true
+
+  base-replacement:
+    description: 'Optional base image reference replacement used when building parallel collections (without a tag)'
+    required: false
 
   registry-username:
     description: 'Registry username for authentication'
@@ -44,16 +48,26 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        BASE_IMAGE: ${{ inputs.base-image }}
+        BASE_IMAGE: ${{ inputs.base-replacement || inputs.base-image }}
       run: |
         OWNER="$(sed -E 's#^[^/]*[.:][^/]*/##; s#/.*##' <<< "$BASE_IMAGE")"
         gh attestation verify "oci://$BASE_IMAGE:latest" --owner "$OWNER"
+
+    - name: Apply base replacement
+      if: ${{ inputs.base-replacement != '' }}
+      shell: bash
+      env:
+        RECIPE: ${{ inputs.recipe }}
+        BASE_IMAGE: ${{ inputs.base-image }}
+        BASE_REPLACEMENT: ${{ inputs.base-replacement }}
+      run: |
+        sed -E "s|$(sed 's/[]\/$*.^[]/\\&/g' <<< "$BASE_IMAGE")(:[^:@/]*)?|${BASE_REPLACEMENT}\1|g" -i "$RECIPE"
 
     - name: Change tag in recipe
       if: ${{ github.ref_type != 'tag' }}
       shell: bash
       env:
-        BASE_IMAGE: ${{ inputs.base-image }}
+        BASE_IMAGE: ${{ inputs.base-replacement || inputs.base-image }}
         BASE_REF: ${{ github.base_ref }}
         REF_NAME: ${{ github.ref_name }}
         RECIPE: ${{ inputs.recipe }}
@@ -65,18 +79,6 @@ runs:
         fi
         sed -E "s|$(sed 's/[]\/$*.^[]/\\&/g' <<< "$BASE_IMAGE")(:[^:@/]*)?|${BASE_IMAGE}:$TAG|g" -i "$RECIPE"
 
-    - name: Generate Containerfile
-      uses: vanilla-os/vib-gh-action@v1.1.0
-      with:
-        recipe: ${{ inputs.recipe }}
-
-    - name: Upload Containerfile
-      uses: actions/upload-artifact@v7
-      with:
-        name: Containerfile
-        path: Containerfile
-        overwrite: true
-
     - name: Generate image name
       id: image-name
       shell: bash
@@ -87,8 +89,21 @@ runs:
         IMAGE_URL="$(echo "$IMAGE_INPUT" | tr '[:upper:]' '[:lower:]')"
         echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_ENV"
         echo "IMAGE_REGISTRY=${IMAGE_URL%/*}" >> "$GITHUB_ENV"
+        echo "IMAGE_NAME=${IMAGE_URL##*/}" >> "$GITHUB_ENV"
         echo "ARCH=${ARCH,,}" >> "$GITHUB_ENV"
         echo "image-url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+
+    - name: Generate Containerfile
+      uses: vanilla-os/vib-gh-action@v1.1.0
+      with:
+        recipe: ${{ inputs.recipe }}
+
+    - name: Upload Containerfile
+      uses: actions/upload-artifact@v7
+      with:
+        name: Containerfile-${{ env.IMAGE_NAME }}
+        path: Containerfile
+        overwrite: true
 
     - name: Docker meta
       id: meta
@@ -144,7 +159,7 @@ runs:
       if: ${{ github.event_name != 'pull_request' }}
       uses: actions/upload-artifact@v7
       with:
-        name: digests-${{ env.ARCH }}
+        name: digests-${{ env.ARCH }}-${{ env.IMAGE_NAME }}
         path: ${{ runner.temp }}/digests/*
         if-no-files-found: error
         retention-days: 1
