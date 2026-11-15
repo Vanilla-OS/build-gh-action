@@ -1,4 +1,4 @@
-name: 'Vanilla OS Desktop Image Build'
+name: 'Build Image'
 description: 'Build a Vanilla OS image from a Vib recipe and push it for the runner architecture'
 author: 'Vanilla OS Contributors'
 branding:
