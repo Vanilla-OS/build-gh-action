@@ -16,15 +16,8 @@ on:
       - '*'
   pull_request:
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-  attestations: write
-
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +26,12 @@ jobs:
             arch: amd64
           - runner: ubuntu-26.04-arm
             arch: arm64
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +42,6 @@ jobs:
           base-image: ghcr.io/vanilla-os/core
 
   merge:
-    name: Merge
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04

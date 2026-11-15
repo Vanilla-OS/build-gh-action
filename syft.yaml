@@ -1,0 +1,9 @@
+output:
+  - "spdx-json"
+
+default-catalogers:
+  - dpkg-db-cataloger
+
+file:
+  metadata:
+    selection: "none"
