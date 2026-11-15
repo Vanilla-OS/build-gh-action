@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: vanilla-os/build-gh-action@main
+      - uses: vanilla-os/build-gh-action@v1
         with:
           image: ghcr.io/${{ github.repository_owner }}/gnome
           base-image: ghcr.io/vanilla-os/core
@@ -51,7 +51,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: vanilla-os/merge-gh-action@main
+      - uses: vanilla-os/merge-gh-action@v1
         with:
           image: ghcr.io/${{ github.repository_owner }}/gnome
 ```
