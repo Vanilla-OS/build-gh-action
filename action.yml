@@ -103,7 +103,7 @@ runs:
         echo "OCI_ARCH=$OCI_ARCH" >> "$GITHUB_ENV"
 
     - name: Generate Containerfile
-      uses: vanilla-os/vib-gh-action@v1.1.0
+      uses: vanilla-os/vib-action@v1.1.0
       with:
         recipe: ${{ inputs.recipe }}
 
