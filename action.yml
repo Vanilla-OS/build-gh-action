@@ -1,4 +1,4 @@
-name: 'Vanilla OS Desktop Image Build'
+name: 'Build Image'
 description: 'Build a Vanilla OS image from a Vib recipe and push it for the runner architecture'
 author: 'Vanilla OS Contributors'
 branding:
@@ -26,10 +26,12 @@ inputs:
   registry-username:
     description: 'Registry username for authentication'
     required: false
+    default: ${{ github.repository_owner }}
 
   registry-password:
     description: 'Registry password or token for authentication'
     required: false
+    default: ${{ github.token }}
 
 outputs:
   digest:
@@ -88,13 +90,20 @@ runs:
       run: |
         IMAGE_URL="$(echo "$IMAGE_INPUT" | tr '[:upper:]' '[:lower:]')"
         echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_ENV"
-        echo "IMAGE_REGISTRY=${IMAGE_URL%/*}" >> "$GITHUB_ENV"
+        echo "IMAGE_REGISTRY=${IMAGE_URL%%/*}" >> "$GITHUB_ENV"
         echo "IMAGE_NAME=${IMAGE_URL##*/}" >> "$GITHUB_ENV"
         echo "ARCH=${ARCH,,}" >> "$GITHUB_ENV"
         echo "image-url=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+        case "$ARCH" in
+          X64|x64)     OCI_ARCH=amd64 ;;
+          ARM64|arm64) OCI_ARCH=arm64 ;;
+          ARM|arm)     OCI_ARCH=arm   ;;
+          *)           OCI_ARCH="$(echo "$ARCH" | tr '[:upper:]' '[:lower:]')" ;;
+        esac
+        echo "OCI_ARCH=$OCI_ARCH" >> "$GITHUB_ENV"
 
     - name: Generate Containerfile
-      uses: vanilla-os/vib-gh-action@v1.1.0
+      uses: vanilla-os/vib-action@v1.1.0
       with:
         recipe: ${{ inputs.recipe }}
 
@@ -121,8 +130,8 @@ runs:
       uses: redhat-actions/podman-login@v2
       with:
         registry: ${{ env.IMAGE_REGISTRY }}
-        username: ${{ inputs.registry-username || github.repository_owner }}
-        password: ${{ inputs.registry-password || github.token }}
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
 
     - name: Build image
       id: build
@@ -145,6 +154,28 @@ runs:
           "${{ steps.build.outputs.image-with-tag }}" \
           "docker://${{ env.IMAGE_URL }}@@unknown-digest@@"
         echo "digest=$(cat "${{ runner.temp }}/digest")" >> "$GITHUB_OUTPUT"
+
+    - name: Generate SPDX SBOM
+      if: ${{ github.event_name != 'pull_request' }}
+      uses: anchore/sbom-action@v0
+      with:
+        image: ${{ env.IMAGE_URL }}@${{ steps.push.outputs.digest }}
+        registry-username: ${{ inputs.registry-username }}
+        registry-password: ${{ inputs.registry-password }}
+        output-file: ${{ runner.temp }}/sbom.spdx.json
+        artifact-name: sbom-${{ env.ARCH }}-${{ env.IMAGE_NAME }}.spdx.json
+        config: ${{ github.action_path }}/syft.yaml
+
+    - name: Push and attest SPDX SBOM
+      if: ${{ github.event_name != 'pull_request' }}
+      uses: actions/attest@v4
+      with:
+        subject-name: ${{ env.IMAGE_URL }}
+        subject-digest: ${{ steps.push.outputs.digest }}
+        sbom-path: ${{ runner.temp }}/sbom.spdx.json
+        push-to-registry: true
+        create-storage-record: true
+        show-summary: true
 
     - name: Export digest
       if: ${{ github.event_name != 'pull_request' }}
