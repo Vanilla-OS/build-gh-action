@@ -16,15 +16,8 @@ on:
       - '*'
   pull_request:
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-  attestations: write
-
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +26,12 @@ jobs:
             arch: amd64
           - runner: ubuntu-26.04-arm
             arch: arm64
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +42,6 @@ jobs:
           base-image: ghcr.io/vanilla-os/core
 
   merge:
-    name: Merge
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
@@ -64,8 +62,7 @@ jobs:
 | --- | --- | --- | --- |
 | `recipe` | | `recipe.yml` | Path to the vib recipe. |
 | `image` | ✅ | — | Target image name, e.g. `ghcr.io/owner/my-image` (without a tag). Lowercased per the OCI spec. |
-| `base-image` | | `ghcr.io/vanilla-os/core:latest` | Base image reference in `recipe.yml` that is verified/substituted (without a tag). |
-| `base-replacement` | | — | Replacement for the base image reference in `recipe.yml`, used for building parallel collections (without a tag). |
+| `base-image` | | — | Replacement for the base image reference in `recipe.yml`, used for building parallel collections (without a tag). |
 | `registry-username` | | `github.repository_owner` | Registry username. Only needed for non-GHCR registries. |
 | `registry-password` | | `github.token` | Registry password or token. Only needed for non-GHCR registries. |
 
