@@ -19,6 +19,10 @@ inputs:
     description: 'Optional base image reference replacement used when building parallel collections (without a tag)'
     required: false
 
+  base-replacement:
+    description: 'Optional base image reference replacement used when building parallel collections (without a tag)'
+    required: false
+
   registry-username:
     description: 'Registry username for authentication'
     required: false
